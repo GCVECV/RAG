@@ -3,7 +3,7 @@ import streamlit as st
 from sentence_transformers import CrossEncoder
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
-from config import RERANK_THRESHOLD
+from config import RERANK_THRESHOLD, VECTOR_DISTANCE_THRESHOLD
 from llm import get_llm_client
 from query_analysis import rewrite_query, decompose_multi_hop, generate_query_variants
 from document_loader import save_history
@@ -13,7 +13,7 @@ def handle_query(query):
     """处理用户一次提问的完整流程（含 UI 渲染、拒答分支与历史保存）。"""
     if st.session_state.collection is None:
         st.warning("请先上传并解析文件")
-        answer = None          # 【修复 1】确保 answer 有定义
+        answer = None        
     else:
         st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
@@ -28,7 +28,7 @@ def handle_query(query):
                 bm25_docs = []
                 bm25_retriever = st.session_state.get('bm25_retriever', None)
 
-                # ========== 【新增：多跳分解与迭代检索判断】 ==========
+                # 多跳分解与迭代检索判断
                 sub_queries = decompose_multi_hop(rewritten_query)
                 
                 if sub_queries:
@@ -76,7 +76,7 @@ def handle_query(query):
                             ))
                         if bm25_retriever is not None:
                             bm25_docs.extend(bm25_retriever.invoke(q))
-                # =======================================================
+        
 
                 # RRF 融合
                 scores = {}
@@ -84,26 +84,20 @@ def handle_query(query):
 
                 def rrf_fusion(docs_a, docs_b, k=60):
                     for i, doc in enumerate(docs_a):
-                        # 【修复】RRF 键从"全文"改为元组 (来源, 页码, 父块ID, 内容前80字)，
-                        # 避免不同块因内容相同/重叠发生碰撞、metadata 互相覆盖
                         key = (doc.metadata.get("source", ""), doc.metadata.get("page", 0),
                                doc.metadata.get("parent_id", ""), doc.page_content[:80])
                         scores[key] = scores.get(key, 0) + 1 / (k + i + 1)
                         rrf_meta[key] = doc
                     for i, doc in enumerate(docs_b):
-                        # 【修复】RRF 键从"全文"改为元组 (来源, 页码, 父块ID, 内容前80字)，
-                        # 避免不同块因内容相同/重叠发生碰撞、metadata 互相覆盖
                         key = (doc.metadata.get("source", ""), doc.metadata.get("page", 0),
                                doc.metadata.get("parent_id", ""), doc.page_content[:80])
                         scores[key] = scores.get(key, 0) + 1 / (k + i + 1)
                         rrf_meta[key] = doc
                     sorted_keys = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)[:10]
-                    # 【修复】key 改为元组后直接返回原 doc，避免 page_content 被截断为 80 字或把元组当正文
                     return [rrf_meta[k] for k in sorted_keys]
 
                 rrf_docs = rrf_fusion(vector_docs, bm25_docs)
 
-                # ========== 【核心优化：先对子块做 Rerank，速度极快，精度极高】 ==========
                 top_score = 0.0
                 top_children = []
                 try:
@@ -114,7 +108,6 @@ def handle_query(query):
                         reranker = st.session_state.reranker
                         pairs = [[rewritten_query, doc.page_content] for doc in rrf_docs] # 对 250 字的子块打分
                         
-                        # 【修复 OOM】分批计算 Rerank，防止瞬间内存撑爆
                         reranker_scores = []
                         batch_size = 4
                         for i in range(0, len(pairs), batch_size):
@@ -129,15 +122,41 @@ def handle_query(query):
                         top_children = [doc for _, doc in ranked[:3]] # 选出 Top 3 子块
                 except Exception as e:
                     print(f"⚠️ Rerank 失败，降级使用 RRF 结果：{e}")
-                    # 【修复】降级时置 -1.0 而非 1.0：1.0 永远大于拒答阈值 0.2，
-                    # 会让无关文档绕过阈值被送进 LLM；置 -1.0 必走拒答分支，宁可不答也不错答
                     top_score = -1.0
                     top_children = rrf_docs[:3]
 
-                # ========== 【用 Top 3 子块去回溯父块】 ==========
+                # 双信号兜底】Rerank 低分时回退向量距离复核 
+                # 背景：Rerank 对问答体/FAQ 风格文本打分系统性偏低（消融评测实测误杀 Q07/Q28）
+                # 固定阈值一刀切会把确实相关的内容拒答。方案：
+                #   Rerank 分数低于阈值 -> 用向量余弦距离做第二信号；
+                #   两路都弱（Rerank 低分 且 向量距离 > 0.6）才拒答，向量信号强则放行。
+                if top_score < RERANK_THRESHOLD and rrf_docs:
+                    _top_score_orig = top_score
+                    try:
+                        _q_emb2 = st.session_state.model.encode(
+                            [rewritten_query], normalize_embeddings=True
+                        ).tolist()
+                        _v2 = st.session_state.collection.query(
+                            query_embeddings=_q_emb2,
+                            n_results=1,
+                            include=["documents", "metadatas", "distances"],
+                        )
+                        _dist = _v2["distances"][0][0] if _v2["distances"][0] else 1.0
+                        if _dist <= VECTOR_DISTANCE_THRESHOLD:
+                            # 向量信号强：放行，改用 RRF Top3 子块进入父块回溯
+                            top_score = RERANK_THRESHOLD + 0.01
+                            top_children = rrf_docs[:3]
+                            print(f"🛟 双信号兜底放行：Rerank={_top_score_orig:.4f} < {RERANK_THRESHOLD}，"
+                                  f"向量距离={_dist:.4f} <= {VECTOR_DISTANCE_THRESHOLD}，改用 RRF Top3")
+                        else:
+                            print(f"🚫 双信号均弱，维持拒答：Rerank={_top_score_orig:.4f}，"
+                                  f"向量距离={_dist:.4f} > {VECTOR_DISTANCE_THRESHOLD}")
+                    except Exception as e2:
+                        print(f"⚠️ 双信号复核失败，维持原拒答判断：{e2}")
+
                 final_docs = []
                 if top_children and st.session_state.parents_collection is not None:
-                    # 去重获取 parent_id
+
                     parent_ids = list(dict.fromkeys([
                         d.metadata.get("parent_id") for d in top_children
                         if d.metadata and d.metadata.get("parent_id")
@@ -145,8 +164,6 @@ def handle_query(query):
                     if parent_ids:
                         try:
                             p_res = st.session_state.parents_collection.get(ids=parent_ids)
-                            # 【修复】按 id2doc 映射取回父块，严格保持 parent_ids（即子块 Rerank 分数降序）的顺序；
-                            # 原先直接 zip 依赖 chromadb get() 的返回顺序，乱序时最相关父块可能排不到 context 最前
                             id2doc = {
                                 pid: (p_text, p_meta)
                                 for pid, p_text, p_meta in zip(
@@ -165,30 +182,24 @@ def handle_query(query):
                             print(f"⚠️ 回溯父块失败，直接使用子块：{e}")
                             final_docs = top_children
                 else:
-                    final_docs = top_children # 兜底
+                    final_docs = top_children 
 
                 reranker_docs = [doc.page_content for doc in final_docs]
                 reranker_metas = [doc.metadata for doc in final_docs]
 
-            # ========== 【修改：退出 spinner 作用域，解决 DOM removeChild 报错】 ==========
-            # 注意：从这里开始，代码已经退出了 with st.spinner 块
-            # ========== 【修复 5】用 Rerank 分数判断是否真的找到资料 ==========
+            
             if not reranker_docs or top_score < RERANK_THRESHOLD:
-                # ========== 【修改：换业务场景 4：空检索降级提示与转人工按钮】 ==========
                 answer = "抱歉，知识库暂未收录该问题的解决方案。"
                 st.markdown(answer)
                 st.warning("您可以尝试换个问法，或者直接联系人工客服。")
                 if st.button("📩 一键提交人工工单"):
                     st.success("已为您生成工单，请留意企业微信通知。")
-                # ==============================================================================
             else:
-                # 拼接上下文
+                
                 context = ""
                 for i, doc in enumerate(reranker_docs):
                     page_info = f"[来源: {reranker_metas[i]['source']} 第{reranker_metas[i]['page']}页]"
                     context += f"{doc}\n{page_info}\n\n"
-
-                # ========== 【修改：换业务场景 5：修改 IT/HR 专家人设与 Prompt 模板】 ==========
                 prompt_template = PromptTemplate(
                     template="""你是一个专业、耐心、严谨的企业 IT 与 HR 专家。
 请基于以下内部资料回答员工的问题。
@@ -205,20 +216,19 @@ def handle_query(query):
 回答：""",
                     input_variables=["context", "question"],
                 )
-                # ==============================================================================
+                
 
                 final_prompt = prompt_template.format(context=context, question=rewritten_query)
 
-                # ========== 【修改：加入流式输出】主回答加异常保护 ==========
+                #流式输出
                 try:
                     client = get_llm_client()
                     response = client.chat.completions.create(
                         model="deepseek-chat",
                         temperature=0.1,
                         messages=[{"role": "user", "content": final_prompt}],
-                        stream=True,  # 开启流式
+                        stream=True,  
                     )
-                    # 使用 st.write_stream 展示打字机效果，并接收完整字符串
                     answer = st.write_stream(
                         chunk.choices[0].delta.content
                         for chunk in response
@@ -227,12 +237,8 @@ def handle_query(query):
                 except Exception as e:
                     answer = f"⚠️ 生成回答失败，请稍后重试（{e}）"
                     st.markdown(answer)
-                # ================================================
                 
-                # 注意：原本的 st.markdown(answer) 必须注释掉，因为 st.write_stream 已经渲染了！
-
-    # ========== 【修复 1】只在有答案时追加并保存 ==========
     if answer is not None:
         st.session_state.messages.append({"role": "assistant", "content": answer})
         save_history()
-    # =====================================================
+

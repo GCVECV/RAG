@@ -30,9 +30,9 @@ def rewrite_query(query, history_messages):
     except Exception as e:
         print(f"⚠️ 改写失败，使用原问题：{e}")
         return query
-# =====================================================
 
-# ========== 【新增：多跳分解函数】 ==========
+
+# 分解函数
 def decompose_multi_hop(query):
     """判断问题是否跨文件/多步，如果是，返回拆解后的列表，否则返回空列表"""
     prompt = f"""你是一个逻辑推理专家。请判断用户的问题是否需要经过两步或两步以上的逻辑推导才能回答（即多跳问题）。
@@ -52,14 +52,12 @@ def decompose_multi_hop(query):
         )
         data = json.loads(resp.choices[0].message.content)
         subs = data.get("sub_queries", [])
-        # 【修复】子查询最多取 3 步：LLM 一次可能拆出 4 个以上子查询，不设上限会导致检索次数与耗时膨胀
         return subs[:3] if isinstance(subs, list) and len(subs) >= 2 else []
     except Exception as e:
         print(f"⚠️ 多跳分解失败：{e}")
         return []
-# ============================================
 
-# ========== 多查询检索——生成多个查询变体 ==========
+#多查询检索——生成多个查询变体
 def generate_query_variants(query, n=3):
     """让 LLM 生成多个查询变体，用于多路检索。"""
     prompt = f"""请为以下问题生成 {n} 个不同的查询变体，用于多路检索。
@@ -78,18 +76,10 @@ def generate_query_variants(query, n=3):
         )
         variants_text = response.choices[0].message.content.strip()
         variants = [v.strip() for v in variants_text.split("\n") if v.strip()]
-        #variants_text = "什么是RAG？\n\n RAG的定义是什么？ \n\n"
-        # variants_text.split("\n"):把大模型返回的多行文字，按换行符切开，变成列表。
-        #得到["什么是RAG？", "", " RAG的定义是什么？ ", ""]
-        #if v.strip()：判断处理之后有没有值，有保留（只是判断，不处理，保留是是没有剪掉的原值），没有去除
-        #v.strip() for v ...：把保留下来的内容，去掉两头的空格，存进新列表。
-        #最终结果：最终结果：["什么是RAG？", "RAG的定义是什么？"]
-        # 把原问题也加进去，一起去检索
         all_queries = [query] + variants[:n]
-        #把原问题和生成的 3 个变体拼在一起，返回一个包含 4 个问题的列表。
+       
         print(f"🔍 多查询生成：{all_queries}")
         return all_queries
     except Exception as e:
         print(f"⚠️ 多查询生成失败，只用原问题：{e}")
         return [query]
-# =====================================================

@@ -15,13 +15,6 @@ def save_history():
     except Exception as e:
         print(f"⚠️ 保存历史失败：{e}")
         
-# "w"：代表 Write（写）。打开文件准备清空重写。
-# json.dump(数据, 文件, ...)：把内存里的聊天记录列表，转成文字存进硬盘。
-# ensure_ascii=False：保住中文。如果设成 True，中文“你好”会变成 \u4f60\u597d 这种乱码。
-# indent=2：存进去的文字，每行缩进 2 个空格，看起来排版好看。
-
-
-# =====================================================
 
 def parse_uploaded_file(uploaded_file):
     page_texts = []

@@ -1,5 +1,5 @@
 # 入库模块：文件解析 -> 父子分块 -> 向量化 -> 增量入库 -> 重建 BM25 检索器
-import hashlib     #用来生成哈希值（一种独特的指纹）。后面用来给文本块生成唯一 ID，防止重复入库。
+import hashlib   
 import streamlit as st
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -15,13 +15,13 @@ def run_ingest(uploaded_files):
     with st.spinner("正在解析文件并向量化（父子分块），请稍后..."):
         all_chunks = []
         all_metadatas = []
-        all_chunk_ids = []          # 【新增】子块 ID 列表
-        all_parents = []            # 【新增】父块文本
-        all_parent_metadatas = []   # 【新增】父块元数据
-        all_parent_ids = []         # 【新增】父块 ID
+        all_chunk_ids = []         
+        all_parents = []            
+        all_parent_metadatas = []   
+        all_parent_ids = []         
         all_chunk = 0
 
-        # 【新增】父子两套切分器
+
         parent_splitter = RecursiveCharacterTextSplitter(
             chunk_size=PARENT_CHUNK_SIZE, chunk_overlap=PARENT_CHUNK_OVERLAP
         )
@@ -32,7 +32,7 @@ def run_ingest(uploaded_files):
         for uploaded_file in uploaded_files:
             page_texts = parse_uploaded_file(uploaded_file)
             for pt in page_texts:
-                # 【新增】先切父块
+             
                 for p_idx, p_text in enumerate(parent_splitter.split_text(pt['text'])):
                     pid = hashlib.md5(
                         f"P:{uploaded_file.name}:{pt['page']}:{p_idx}:{p_text[:50]}".encode("utf-8")
@@ -41,7 +41,7 @@ def run_ingest(uploaded_files):
                     all_parent_metadatas.append({"source": uploaded_file.name, "page": pt["page"]})
                     all_parent_ids.append(pid)
 
-                    # 【新增】父块内再切子块，子块记录 parent_id
+
                     for c_idx, c_text in enumerate(child_splitter.split_text(p_text)):
                         cid = hashlib.md5(
                             f"C:{pid}:{c_idx}:{c_text[:50]}".encode("utf-8")
@@ -61,14 +61,14 @@ def run_ingest(uploaded_files):
         st.error("解析失败")
         st.stop()
 
-    # ========== 【修复 3】增量入库：不再删除旧库 ==========
+
     client = chromadb.PersistentClient(path=CHROMA_PATH)
     collection = client.get_or_create_collection(
         name="collection",
         metadata={"hnsw:space": "cosine"},
     )
     embeddings = st.session_state.model.encode(all_chunks,batch_size=32).tolist()
-    # 【修改】子块 ID 带上 parent_id，避免跨父块同内容互相覆盖
+
     collection.upsert(
         documents=all_chunks,
         metadatas=all_metadatas,
@@ -76,7 +76,6 @@ def run_ingest(uploaded_files):
         ids=all_chunk_ids,
     )
 
-    # 【新增】父块单独入库：零向量，只用于按 id 取回，不参与检索
     parent_collection = client.get_or_create_collection(name="collection_parents")
     _dim = st.session_state.model.get_sentence_embedding_dimension()
     parent_embeddings = [[0.0] * _dim for _ in all_parents]
@@ -86,10 +85,7 @@ def run_ingest(uploaded_files):
         embeddings=parent_embeddings,
         ids=all_parent_ids,
     )
-#upsert = update + insert。
-#如果数据库里没有这个 ID，就插入（insert）；如果有，就更新（update）。这就是增量入库的核心。
 
-    # 入库后从库中全量取回文档，重建 BM25，保证检索一致（BM25 只基于子块）
     stored = collection.get(include=["documents", "metadatas"])
     st.session_state.all_docs = [
         Document(page_content=d, metadata=m)
