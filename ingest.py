@@ -1,5 +1,4 @@
-# 入库模块：文件解析 -> 父子分块 -> 向量化 -> 增量入库 -> 重建 BM25 检索器
-import hashlib   
+import hashlib
 import streamlit as st
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -11,14 +10,14 @@ from document_loader import parse_uploaded_file
 
 
 def run_ingest(uploaded_files):
-    """执行上传文件的父子分块、向量化与增量入库（对应侧边栏“开始解析并存入数据库”按钮）。"""
+    """执行上传文件的父子分块、向量化与增量入库。"""
     with st.spinner("正在解析文件并向量化（父子分块），请稍后..."):
         all_chunks = []
         all_metadatas = []
-        all_chunk_ids = []         
-        all_parents = []            
-        all_parent_metadatas = []   
-        all_parent_ids = []         
+        all_chunk_ids = []
+        all_parents = []
+        all_parent_metadatas = []
+        all_parent_ids = []
         all_chunk = 0
 
 
@@ -32,7 +31,7 @@ def run_ingest(uploaded_files):
         for uploaded_file in uploaded_files:
             page_texts = parse_uploaded_file(uploaded_file)
             for pt in page_texts:
-             
+
                 for p_idx, p_text in enumerate(parent_splitter.split_text(pt['text'])):
                     pid = hashlib.md5(
                         f"P:{uploaded_file.name}:{pt['page']}:{p_idx}:{p_text[:50]}".encode("utf-8")
@@ -98,6 +97,5 @@ def run_ingest(uploaded_files):
     bm25_retriever.k = 5
     st.session_state.bm25_retriever = bm25_retriever
     st.session_state.collection = collection
-    st.session_state.parents_collection = parent_collection   # 【新增】
+    st.session_state.parents_collection = parent_collection
     st.success(f"入库完成：子块 {collection.count()} 个，父块 {parent_collection.count()} 个")
-    # =================================================

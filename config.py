@@ -1,11 +1,10 @@
-# 全局配置模块：集中管理环境变量、路径、阈值与分块参数
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from pathlib import Path  
+from pathlib import Path
 
 
 HISTORY_FILE = Path("./chat_history.json")
@@ -18,4 +17,3 @@ PARENT_CHUNK_SIZE = 1200
 PARENT_CHUNK_OVERLAP = 100
 CHILD_CHUNK_SIZE = 250
 CHILD_CHUNK_OVERLAP = 50
-

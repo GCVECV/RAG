@@ -1,5 +1,4 @@
-# 应用入口：页面配置 / 会话状态初始化 / 持久化知识库加载 / 侧边栏 / 快捷提问 / 提问入口
-import json  
+import json
 import streamlit as st
 import chromadb
 import jieba
@@ -14,7 +13,6 @@ from qa_flow import handle_query
 st.set_page_config(page_title="企业智能服务台", page_icon="👔")
 st.title("👔 企业智能服务台")
 
-# ========== 会话状态初始化 ==========
 if 'messages' not in st.session_state:
     if HISTORY_FILE.exists():
         try:
@@ -41,7 +39,7 @@ if "bm25_retriever" not in st.session_state:
     st.session_state.bm25_retriever = None
 
 
-if st.session_state.collection is None: 
+if st.session_state.collection is None:
     try:
         _client = chromadb.PersistentClient(path=CHROMA_PATH)
         if any(c.name == "collection" for c in _client.list_collections()):
@@ -50,7 +48,7 @@ if st.session_state.collection is None:
                 st.session_state.collection = _col
                 if any(c.name == "collection_parents" for c in _client.list_collections()):
                     st.session_state.parents_collection = _client.get_collection(name="collection_parents")
-                _stored = _col.get(include=["documents", "metadatas"]) 
+                _stored = _col.get(include=["documents", "metadatas"])
                 st.session_state.all_docs = [
                     Document(page_content=d, metadata=m)
                     for d, m in zip(_stored["documents"], _stored["metadatas"])
@@ -75,7 +73,6 @@ with st.sidebar:
         if st.button("开始解析并存入数据库"):
             run_ingest(uploaded_files)
 
-    # ========== 清空知识库按钮 ==========
     if st.button("🧹 清空知识库"):
         try:
             _c = chromadb.PersistentClient(path=CHROMA_PATH)
@@ -89,26 +86,23 @@ with st.sidebar:
         except Exception:
             pass
         st.session_state.collection = None
-        st.session_state.parents_collection = None  
+        st.session_state.parents_collection = None
         st.session_state.all_docs = []
         st.session_state.bm25_retriever = None
         st.success("知识库已清空，请重新上传文件")
-        st.rerun()  
+        st.rerun()
 
-    # 清空对话历史按钮
     if st.button("🗑️ 清空对话历史"):
         st.session_state.messages = []
         if HISTORY_FILE.exists():
-            HISTORY_FILE.unlink() 
+            HISTORY_FILE.unlink()
         st.success("已清空对话历史")
         st.rerun()
 
-# 渲染历史消息
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# ========== 【增加快捷提问按钮】 ==========
 st.markdown("💡 **常见问题快速提问：**")
 col1, col2, col3 = st.columns(3)
 quick_query = None
@@ -123,7 +117,6 @@ with col3:
         quick_query = "年假怎么计算？"
 
 
-# ========== 提问处理 ==========
 query_input = st.chat_input("请输入问题：")
 query = quick_query or query_input
 

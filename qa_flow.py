@@ -1,4 +1,3 @@
-# 提问处理主流程模块：改写 -> 多跳分解/变体生成 -> 混合检索 -> RRF 融合 -> 子块重排 -> 父块回溯 -> 拒答判断 -> 流式生成
 import streamlit as st
 from sentence_transformers import CrossEncoder
 from langchain_core.documents import Document
@@ -10,36 +9,34 @@ from document_loader import save_history
 
 
 def handle_query(query):
-    """处理用户一次提问的完整流程（含 UI 渲染、拒答分支与历史保存）。"""
+    """处理一次提问：改写、检索、重排、拒答判断、流式生成，并保存历史。"""
     if st.session_state.collection is None:
         st.warning("请先上传并解析文件")
-        answer = None        
+        answer = None
     else:
         st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
 
-        # 多轮对话查询改写
         rewritten_query = rewrite_query(query, st.session_state.messages[:-1])
-        
+
         with st.chat_message("assistant"):
             with st.spinner("正在检索中..."):
                 vector_docs = []
                 bm25_docs = []
                 bm25_retriever = st.session_state.get('bm25_retriever', None)
 
-                # 多跳分解与迭代检索判断
                 sub_queries = decompose_multi_hop(rewritten_query)
-                
+
                 if sub_queries:
                     st.info(f"🧠 检测到跨文件/多跳问题，Agent 已自动拆解步骤：{' -> '.join(sub_queries)}")
                     current_context = ""
                     for idx, sub_q in enumerate(sub_queries):
-                        # 如果是第二步及以后，把上一步的检索结果作为线索拼进去
+                        # 第二步起拼入上一步的检索结果作为线索
                         search_q = sub_q
                         if idx > 0 and current_context:
                             search_q = f"{sub_q} (已知前置信息: {current_context[:150]})"
-                            
+
                         print(f"🔍 多跳迭代检索 第 {idx+1} 步：{search_q}")
                         q_emb = st.session_state.model.encode([search_q]).tolist()
                         v_res = st.session_state.collection.query(
@@ -53,16 +50,12 @@ def handle_query(query):
                             ))
                         if bm25_retriever is not None:
                             bm25_docs.extend(bm25_retriever.invoke(search_q))
-                            
-                        # 将当前步骤的检索结果提取为下一步的线索
+
                         if v_res['documents'][0]:
                             current_context = " ".join([d[:150] for d in v_res['documents'][0][:2]])
                 else:
-                    # 如果不是多跳，走原有的单步多查询逻辑
                     query_variants = generate_query_variants(rewritten_query, n=3)
-                    #生成包含原问题在内的 4 个变体列表
-                    
-                    # 每个变体都做向量检索 + BM25 检索，结果合并
+
                     for q in query_variants:
                         q_emb = st.session_state.model.encode([q]).tolist()
                         v_res = st.session_state.collection.query(
@@ -76,9 +69,8 @@ def handle_query(query):
                             ))
                         if bm25_retriever is not None:
                             bm25_docs.extend(bm25_retriever.invoke(q))
-        
 
-                # RRF 融合
+
                 scores = {}
                 rrf_meta = {}
 
@@ -106,30 +98,26 @@ def handle_query(query):
                             with st.spinner("正在加载Rerank模型，请稍等..."):
                                 st.session_state.reranker = CrossEncoder('BAAI/bge-reranker-base')
                         reranker = st.session_state.reranker
-                        pairs = [[rewritten_query, doc.page_content] for doc in rrf_docs] # 对 250 字的子块打分
-                        
+                        pairs = [[rewritten_query, doc.page_content] for doc in rrf_docs]
+
                         reranker_scores = []
                         batch_size = 4
                         for i in range(0, len(pairs), batch_size):
                             batch = pairs[i:i+batch_size]
                             batch_scores = reranker.predict(batch)
                             reranker_scores.extend(batch_scores)
-                        
+
                         print(f"📊 子块 Rerank 分数范围：{min(reranker_scores):.4f} ~ {max(reranker_scores):.4f}，top1={max(reranker_scores):.4f}")
-                        
+
                         ranked = sorted(zip(reranker_scores, rrf_docs), key=lambda x: x[0], reverse=True)
                         top_score = float(ranked[0][0])
-                        top_children = [doc for _, doc in ranked[:3]] # 选出 Top 3 子块
+                        top_children = [doc for _, doc in ranked[:3]]
                 except Exception as e:
                     print(f"⚠️ Rerank 失败，降级使用 RRF 结果：{e}")
                     top_score = -1.0
                     top_children = rrf_docs[:3]
 
-                # 双信号兜底】Rerank 低分时回退向量距离复核 
-                # 背景：Rerank 对问答体/FAQ 风格文本打分系统性偏低（消融评测实测误杀 Q07/Q28）
-                # 固定阈值一刀切会把确实相关的内容拒答。方案：
-                #   Rerank 分数低于阈值 -> 用向量余弦距离做第二信号；
-                #   两路都弱（Rerank 低分 且 向量距离 > 0.6）才拒答，向量信号强则放行。
+                # Rerank 低分时用向量距离复核，双信号均弱才拒答，避免 FAQ 类文本被误杀
                 if top_score < RERANK_THRESHOLD and rrf_docs:
                     _top_score_orig = top_score
                     try:
@@ -143,7 +131,6 @@ def handle_query(query):
                         )
                         _dist = _v2["distances"][0][0] if _v2["distances"][0] else 1.0
                         if _dist <= VECTOR_DISTANCE_THRESHOLD:
-                            # 向量信号强：放行，改用 RRF Top3 子块进入父块回溯
                             top_score = RERANK_THRESHOLD + 0.01
                             top_children = rrf_docs[:3]
                             print(f"🛟 双信号兜底放行：Rerank={_top_score_orig:.4f} < {RERANK_THRESHOLD}，"
@@ -182,12 +169,11 @@ def handle_query(query):
                             print(f"⚠️ 回溯父块失败，直接使用子块：{e}")
                             final_docs = top_children
                 else:
-                    final_docs = top_children 
+                    final_docs = top_children
 
                 reranker_docs = [doc.page_content for doc in final_docs]
                 reranker_metas = [doc.metadata for doc in final_docs]
 
-            
             if not reranker_docs or top_score < RERANK_THRESHOLD:
                 answer = "抱歉，知识库暂未收录该问题的解决方案。"
                 st.markdown(answer)
@@ -195,7 +181,7 @@ def handle_query(query):
                 if st.button("📩 一键提交人工工单"):
                     st.success("已为您生成工单，请留意企业微信通知。")
             else:
-                
+
                 context = ""
                 for i, doc in enumerate(reranker_docs):
                     page_info = f"[来源: {reranker_metas[i]['source']} 第{reranker_metas[i]['page']}页]"
@@ -216,18 +202,16 @@ def handle_query(query):
 回答：""",
                     input_variables=["context", "question"],
                 )
-                
 
                 final_prompt = prompt_template.format(context=context, question=rewritten_query)
 
-                #流式输出
                 try:
                     client = get_llm_client()
                     response = client.chat.completions.create(
                         model="deepseek-chat",
                         temperature=0.1,
                         messages=[{"role": "user", "content": final_prompt}],
-                        stream=True,  
+                        stream=True,
                     )
                     answer = st.write_stream(
                         chunk.choices[0].delta.content
@@ -237,8 +221,7 @@ def handle_query(query):
                 except Exception as e:
                     answer = f"⚠️ 生成回答失败，请稍后重试（{e}）"
                     st.markdown(answer)
-                
+
     if answer is not None:
         st.session_state.messages.append({"role": "assistant", "content": answer})
         save_history()
-

@@ -1,4 +1,3 @@
-# 文档解析与对话历史保存模块
 import io
 import json
 import pdfplumber
@@ -6,7 +5,7 @@ import docx2txt
 import streamlit as st
 from config import HISTORY_FILE
 
-# ========== 保存对话历史到本地 ==========
+
 def save_history():
     """把当前对话历史保存到本地 JSON 文件。"""
     try:
@@ -14,7 +13,7 @@ def save_history():
             json.dump(st.session_state.messages, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ 保存历史失败：{e}")
-        
+
 
 def parse_uploaded_file(uploaded_file):
     page_texts = []

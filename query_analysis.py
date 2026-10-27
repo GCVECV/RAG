@@ -1,8 +1,7 @@
-# 查询分析模块：多轮对话改写 / 多跳分解 / 查询变体生成
 import json
 from llm import get_llm_client
 
-# ========== 多轮对话查询改写 ==========
+
 def rewrite_query(query, history_messages):
     """结合历史对话，把当前问题改写成一句独立、完整的话。"""
     if not history_messages:
@@ -32,7 +31,6 @@ def rewrite_query(query, history_messages):
         return query
 
 
-# 分解函数
 def decompose_multi_hop(query):
     """判断问题是否跨文件/多步，如果是，返回拆解后的列表，否则返回空列表"""
     prompt = f"""你是一个逻辑推理专家。请判断用户的问题是否需要经过两步或两步以上的逻辑推导才能回答（即多跳问题）。
@@ -57,7 +55,7 @@ def decompose_multi_hop(query):
         print(f"⚠️ 多跳分解失败：{e}")
         return []
 
-#多查询检索——生成多个查询变体
+
 def generate_query_variants(query, n=3):
     """让 LLM 生成多个查询变体，用于多路检索。"""
     prompt = f"""请为以下问题生成 {n} 个不同的查询变体，用于多路检索。
@@ -71,13 +69,13 @@ def generate_query_variants(query, n=3):
         client = get_llm_client()
         response = client.chat.completions.create(
             model="deepseek-chat",
-            temperature=0.7, #稍微提高一点随机性，让大模型生成不同的问法
+            temperature=0.7,
             messages=[{"role": "user", "content": prompt}],
         )
         variants_text = response.choices[0].message.content.strip()
         variants = [v.strip() for v in variants_text.split("\n") if v.strip()]
         all_queries = [query] + variants[:n]
-       
+
         print(f"🔍 多查询生成：{all_queries}")
         return all_queries
     except Exception as e:
